@@ -1,43 +1,120 @@
-# Simple workflow for deploying static content to GitHub Pages
-name: Deploy static content to Pages
+name: CI
 
 on:
-  # Runs on pushes targeting the default branch
   push:
-    branches: ["main"]
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches: [master, main, feat/v2, feat/v2-core]
+  pull_request:
   workflow_dispatch:
+    inputs:
+      run_integration:
+        description: "Run e2e tests against api.telegram.org (requires TEST_TELEGRAM_TOKEN secret)"
+        type: boolean
+        default: false
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
+# Cancel in-progress runs for the same PR/branch when a new commit is pushed.
 concurrency:
-  group: "pages"
-  cancel-in-progress: false
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # Single deploy job since we're just deploying
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  typecheck:
+    name: Typecheck
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
         with:
-          # Upload entire repository
-          path: '.'
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+          bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install dependencies
+        run: bun install --frozen-lockfile || bun install
+      - name: tsc --noEmit (src)
+        run: npm run typecheck
+      - name: tsc --noEmit (test/)
+        run: npm run typecheck:test
+      - name: tsc --noEmit (examples/)
+        run: npm run typecheck:examples
+      - name: Core stays Node-free (lint:core)
+        run: npm run lint:core
+      - name: Core bundles edge-safe (check:edge)
+        run: npm run check:edge
+
+  unit-bun:
+    name: Unit tests (Bun)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile || bun install
+      - name: Run unit tests with Bun
+        run: npm run test
+
+  unit-node:
+    name: Unit tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24", "26"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Run unit tests with Node
+        run: npm run test:node:unit
+
+  build:
+    name: Build (dist)
+    runs-on: ubuntu-latest
+    needs: typecheck
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install dependencies
+        run: bun install --frozen-lockfile || bun install
+      - name: Build
+        run: npm run build
+      - name: Verify dist artefacts
+        run: |
+          test -f dist/core/index.js
+          test -f dist/core/index.d.ts
+          test -f dist/node/index.js
+          test -f dist/node/index.d.ts
+          test -f dist/types/index.js
+          test -f dist/types/index.d.ts
+
+  integration:
+    name: E2E tests (api.telegram.org)
+    runs-on: ubuntu-latest
+    needs: typecheck
+    if: github.event_name == 'workflow_dispatch' && inputs.run_integration
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile || bun install
+      - name: Run e2e tests
+        env:
+          TEST_TELEGRAM_TOKEN: ${{ secrets.TEST_TELEGRAM_TOKEN }}
+          TEST_GROUP_ID: ${{ secrets.TEST_GROUP_ID }}
+          TEST_USER_ID: ${{ secrets.TEST_USER_ID }}
+        run: npm run test:e2e
+        
