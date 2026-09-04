@@ -1,5 +1,8 @@
 name: Type-check third-party bots
 
+permissions:
+    contents: read
+
 on:
     push:
         branches: [main]
